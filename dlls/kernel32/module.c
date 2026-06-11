@@ -262,6 +262,46 @@ BOOL WINAPI GetBinaryTypeA( LPCSTR lpApplicationName, LPDWORD lpBinaryType )
     return GetBinaryTypeW(NtCurrentTeb()->StaticUnicodeString.Buffer, lpBinaryType);
 }
 
+#ifdef __x86_64__
+static BOOL needs_int3_hack(void)
+{
+    static volatile int cache = -1;
+    
+    if (cache == -1)
+    {
+        const WCHAR *p, *name = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+        WCHAR env[8];
+        BOOL ret;
+        
+        if ((p = wcsrchr(name, '/')))
+            name = p + 1;
+        if ((p = wcsrchr(name, '\\')))
+            name = p + 1;
+        
+        ret = ((!wcsicmp(name, L"Endfield.exe")) ||
+               (!wcsicmp(name, L"EM-Win64-Shipping.exe")));
+        
+        if (GetEnvironmentVariableW(L"PROTON_ENABLE_INT3_HACK", env, ARRAY_SIZE(env)))
+        {
+            if (_wtoi(env) == 1)
+                ret = TRUE;
+        }
+        
+        cache = ret;
+    }
+    
+    return cache;
+}
+
+static void __attribute__((naked)) int3_stub( void )
+{
+    asm("int3\t\n"
+        "int3\t\n"
+        "int3\t\n"
+        "int3\t\n");
+}
+#endif
+
 /***********************************************************************
  *           GetProcAddress   		(KERNEL32.@)
  *
@@ -284,6 +324,14 @@ FARPROC get_proc_address( HMODULE hModule, LPCSTR function )
     if ((ULONG_PTR)function >> 16)
     {
         ANSI_STRING     str;
+
+#ifdef __x86_64__
+        if (needs_int3_hack() && (strcmp( function, "KiUserApcDispatcher" ) == 0 || strcmp( function, "KiUserCallbackDispatcher" ) == 0))
+        {
+            FIXME( "HACK: returning int3 stub instead of %s\n", function );
+            return (FARPROC)&int3_stub;
+        }
+#endif
 
         RtlInitAnsiString( &str, function );
         if (!set_ntstatus( LdrGetProcedureAddress( hModule, &str, 0, (void**)&fp ))) return NULL;
